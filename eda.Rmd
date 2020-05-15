@@ -1,0 +1,41 @@
+---
+title: "Exploratory Data Analysis"
+author: "Adam Shelton"
+date: "5/15/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(skimr)
+library(kableExtra)
+library(cowplot)
+library(ggcorrplot)
+library(beachball)
+library(here)
+
+knitr::opts_chunk$set(echo = TRUE, dpi = 200)
+```
+
+## Load Data
+
+```{r}
+analysis_data = readRDS(here("cleaned_data.rds"))
+```
+
+## Descriptive Statistics
+```{r}
+descr_stats = analysis_data %>% skim() %>% partition()
+
+descr_stats$logical %>% kable(caption = "Binary Variables") %>% kable_styling(c("responsive", "condensed", "striped"))
+descr_stats$factor %>% kable(caption = "Factor Variables") %>% kable_styling(c("responsive", "condensed", "striped"))
+descr_stats$numeric %>% kable(caption = "Continuous Variables") %>% kable_styling(c("responsive", "condensed", "striped"))
+descr_stats$Date %>% kable(caption = "Date Variables") %>% kable_styling(c("responsive", "condensed", "striped"))
+```
+
+## Correlation Matrix
+```{r fig.height=7, fig.width=7}
+analysis_data %>% select(-c(id)) %>% mutate_all(as.numeric) %>% cor(use = "pairwise.complete.obs") %>% ggcorrplot(p.mat = cor_pmat(.), hc.order = TRUE)
+```
+
