@@ -10,12 +10,16 @@ library(tidyverse)
 library(lubridate)
 library(skimr)
 library(kableExtra)
-library(cowplot)
+library(cowpoke)
 library(ggcorrplot)
 library(beachball)
 library(here)
 
 knitr::opts_chunk$set(echo = TRUE, dpi = 200)
+
+print_kable = function(x, caption = "") {
+  x %>% kable(caption = caption) %>% kable_styling(c("responsive", "condensed", "striped"), full_width = FALSE)
+}
 ```
 
 ## Load Data
@@ -28,14 +32,80 @@ analysis_data = readRDS(here("cleaned_data.rds"))
 ```{r}
 descr_stats = analysis_data %>% skim() %>% partition()
 
-descr_stats$logical %>% kable(caption = "Binary Variables") %>% kable_styling(c("responsive", "condensed", "striped"))
-descr_stats$factor %>% kable(caption = "Factor Variables") %>% kable_styling(c("responsive", "condensed", "striped"))
-descr_stats$numeric %>% kable(caption = "Continuous Variables") %>% kable_styling(c("responsive", "condensed", "striped"))
-descr_stats$Date %>% kable(caption = "Date Variables") %>% kable_styling(c("responsive", "condensed", "striped"))
+descr_stats$logical %>% print_kable("Binary Variables")
+descr_stats$factor %>% print_kable("Factor Variables")
+descr_stats$numeric %>% print_kable("Continuous Variables")
+descr_stats$Date %>% print_kable("Date Variables")
+
+analysis_data %>% count(offense_year) %>% rename("Offense Year" = offense_year, "Count" = n) %>% print_kable("Reported Offenses by Year") 
+
+analysis_data = analysis_data %>% filter(!is.na(offense_year), offense_year %in% c(2013, 2014))
 ```
+
+It appears the data should be filtered by the years 2013 and 2014.
 
 ## Correlation Matrix
 ```{r fig.height=7, fig.width=7}
 analysis_data %>% select(-c(id)) %>% mutate_all(as.numeric) %>% cor(use = "pairwise.complete.obs") %>% ggcorrplot(p.mat = cor_pmat(.), hc.order = TRUE)
+```
+
+## COMPAS Prediction Accuracy 
+```{r}
+accuracy_data = analysis_data %>% mutate(pred_recid = decile_score_1 > 5) %>% mutate(pred_acc = ifelse(pred_recid == two_year_recid, "Correct Prediction", ifelse(!pred_recid, "False Negative", "False Positive")))
+
+accuracy_data %>% count(pred_acc) %>% mutate(percent = scales::percent(n / sum(n), accuracy = 0.1)) %>% select(-n) %>% rename("Prediction Accuracy" = pred_acc) %>% print_kable("Overall COMPAS Accuracy")
+
+accuracy_data %>% count(sex, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Gender" = sex) %>% print_kable("COMPAS Accuracy by Gender")
+
+accuracy_data %>% count(age_cat, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Age Category" = age_cat) %>% print_kable("COMPAS Accuracy by Age Category")
+
+accuracy_data %>% count(race, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Race" = race) %>% print_kable("COMPAS Accuracy by Race")
+
+accuracy_data %>% count(c_charge_degree, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Charge Degree" = c_charge_degree) %>% print_kable("COMPAS Accuracy by Charge Degree")
+
+collapse_by = function(x, collapse_func = quantile, inclusive = TRUE) {
+  raw_values = collapse_func(x)
+  out = character()
+  if (inclusive) {
+    indices = 1:(length(raw_values) - 1)
+    for (val_index in indices) {
+      out[x >= raw_values[val_index] & x <= raw_values[val_index + 1]] = ifelse(val_index == length(indices), paste("<=", (raw_values[val_index + 1])), paste("<", (raw_values[val_index + 1])))
+    }
+  }
+  factor(out)
+}
+
+accuracy_data %>% mutate(priors_count = collapse_by(priors_count)) %>%  count(priors_count, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Priors Count" = priors_count) %>% print_kable("COMPAS Accuracy by Priors Count")
+
+accuracy_data %>% filter(!is.na(offense_year)) %>% count(offense_year, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Year" = offense_year) %>% print_kable("COMPAS Accuracy by Year of Offense")
+
+accuracy_data %>% filter(!is.na(offense_month)) %>% count(offense_month, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Month" = offense_month) %>% print_kable("COMPAS Accuracy by Month of Offense")
+```
+
+## Equity Tables
+```{r}
+equity_table = function(data_set, demo_var, recid_var = "two_year_recid", demo_label = str_to_sentence(demo_var), recid_label = "Recidivism Rate", format_perc = TRUE) {
+  data_set %>% 
+    count(!!sym(demo_var), !!sym(recid_var)) %>% 
+    crosstab_percent(vars = demo_var, formatted = format_perc) %>% 
+    select(-n) %>% 
+    pivot_wider(names_from = recid_var, values_from = "percent") %>% 
+    select(-`FALSE`) %>% (function(x) {names(x) = c(demo_label, recid_label); x})
+}
+
+accuracy_data %>% 
+  equity_table("sex") %>% 
+  left_join(accuracy_data %>% 
+              equity_table("sex", recid_var = "pred_recid", recid_label = "COMPAS Predicted Rate")) %>% 
+  print_kable("Recidivism Rate by Gender")
+analysis_data %>% 
+  equity_table("age_cat", demo_label = "Age Group") %>% 
+  left_join(accuracy_data %>% 
+              equity_table("age_cat", demo_label = "Age Group", recid_var = "pred_recid", recid_label = "COMPAS Predicted Rate")) %>% 
+  print_kable("Recidivism Rate by Age Group")
+analysis_data %>% 
+  equity_table("race") %>% 
+  left_join(accuracy_data %>% 
+              equity_table("race", recid_var = "pred_recid", recid_label = "COMPAS Predicted Rate")) %>% print_kable("Recidivism Rate by Race")
 ```
 
