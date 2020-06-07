@@ -2,7 +2,11 @@
 title: "Exploratory Data Analysis"
 author: "Adam Shelton"
 date: "5/15/2020"
-output: html_document
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
 ---
 
 ```{r setup, include=FALSE}
@@ -25,87 +29,168 @@ print_kable = function(x, caption = "") {
 ## Load Data
 
 ```{r}
-analysis_data = readRDS(here("cleaned_data.rds"))
+analysis_data = readRDS(here("cleaned_data.rds")) %>% mutate_if(is.character, factor)
+var_cats = read_csv(here("names_to_keep.csv"))
+demo_names = filter(var_cats, discrim)$value %>% .[. %in% names(analysis_data)]
+outcome_names = filter(var_cats, outcome)$value %>% .[. %in% names(analysis_data)]
+
+no_demo_data = analysis_data %>% select(-all_of(demo_names))
+outcome_data = analysis_data %>% select(all_of(outcome_names))
 ```
+
+
 
 ## Descriptive Statistics
 ```{r}
 descr_stats = analysis_data %>% skim() %>% partition()
 
-descr_stats$logical %>% print_kable("Binary Variables")
-descr_stats$factor %>% print_kable("Factor Variables")
-descr_stats$numeric %>% print_kable("Continuous Variables")
-descr_stats$Date %>% print_kable("Date Variables")
-
-analysis_data %>% count(offense_year) %>% rename("Offense Year" = offense_year, "Count" = n) %>% print_kable("Reported Offenses by Year") 
-
-analysis_data = analysis_data %>% filter(!is.na(offense_year), offense_year %in% c(2013, 2014))
+# descr_stats$logical %>% print_kable("Binary Variables")
+descr_stats$factor %>% mutate_if(is.numeric, format_number) %>% print_kable("Factor Variables") 
+descr_stats$numeric %>% mutate_if(is.numeric, format_number) %>% print_kable("Continuous Variables")
 ```
-
-It appears the data should be filtered by the years 2013 and 2014.
 
 ## Correlation Matrix
-```{r fig.height=7, fig.width=7}
-analysis_data %>% select(-c(id)) %>% mutate_all(as.numeric) %>% cor(use = "pairwise.complete.obs") %>% ggcorrplot(p.mat = cor_pmat(.), hc.order = TRUE)
+```{r fig.height=20, fig.width=20}
+analysis_data %>% mutate_all(as.numeric) %>% cor(use = "pairwise.complete.obs") %>% ggcorrplot(p.mat = cor_pmat(.), hc.order = TRUE)
+# p.mat = cor_pmat(.), hc.order = TRUE
 ```
 
-## COMPAS Prediction Accuracy 
+## Flight Risk Accuracy 
+
+Here we are trying to estimate the "accuracy" of those determining whether a person charged with a crime is a flight risk, and therefore should be detained until their trial. While we obviously cannot know whether someone who was detained until trial would have returned for their trial or not from this data, we can attempt to measure this from those who were released after paying their bail. Someone who was released on bail would likely have been considered a significantly greater flight risk than a person released with no bail. We can attempt to measure the amount of false positives by looking at people who were deemed a high enough flight risk for bail, but still returned. Those who were released on bail and did not return are considered to be "correctly" classified here. If someone was released and returned then they were correctly classified, while those who were released without bail and did not return would be considered a false negative. This is not a perfect measurement of classification accuracy, since bail is a variable amount, and is different than being released even if a high flight risk with no collateral, but should be close enough to determine how accuracte and equitable humans are in this process.
+
 ```{r}
-accuracy_data = analysis_data %>% mutate(pred_recid = decile_score_1 > 5) %>% mutate(pred_acc = ifelse(pred_recid == two_year_recid, "Correct Prediction", ifelse(!pred_recid, "False Negative", "False Positive")))
+tibble(" " = c("Paid Bail", "No Bail"), "Appeared at Court" = c("False Positive", "Correct"), "Did Not Appear" = c("Correct", "False Negative")) %>% print_kable()
 
-accuracy_data %>% count(pred_acc) %>% mutate(percent = scales::percent(n / sum(n), accuracy = 0.1)) %>% select(-n) %>% rename("Prediction Accuracy" = pred_acc) %>% print_kable("Overall COMPAS Accuracy")
+accuracy_data = analysis_data %>% 
+  filter(RELDET1 == "Released") %>% 
+  filter(!is.na(FTA1)) %>%
+  mutate(no_bail = (FINREL == "Not made bail"), 
+         fta = FTA1 == "Yes, FTA", 
+         pred_acc = ifelse(fta, 
+                           ifelse(no_bail, "False Negative", "Correct"), 
+                           ifelse(no_bail, "Correct", "False Positive")),
+         race = ifelse(WHITE == "Yes", "White", ifelse(BLACK == "Yes", "Black", ifelse(HISP == "Yes", "Latinx", "Other"))))
 
-accuracy_data %>% count(sex, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Gender" = sex) %>% print_kable("COMPAS Accuracy by Gender")
+# accuracy_data %>% select(FINREL, no_bail, fta, FTA1, pred_acc) %>% distinct() %>% View()
 
-accuracy_data %>% count(age_cat, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Age Category" = age_cat) %>% print_kable("COMPAS Accuracy by Age Category")
+accuracy_data %>% count(pred_acc) %>% na.omit() %>% mutate(percent = scales::percent(n / sum(n), accuracy = 0.1)) %>% select(-n) %>% rename("Prediction Accuracy" = pred_acc) %>% print_kable("Overall Accuracy")
 
-accuracy_data %>% count(race, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Race" = race) %>% print_kable("COMPAS Accuracy by Race")
+accuracy_data %>% count(GENDER, pred_acc) %>% na.omit() %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Gender" = GENDER) %>% print_kable("Accuracy by Gender")
 
-accuracy_data %>% count(c_charge_degree, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Charge Degree" = c_charge_degree) %>% print_kable("COMPAS Accuracy by Charge Degree")
+accuracy_data %>% count(AGED, pred_acc) %>% na.omit() %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Age Category" = AGED) %>% print_kable("Accuracy by Age Category")
 
-collapse_by = function(x, collapse_func = quantile, inclusive = TRUE) {
-  raw_values = collapse_func(x)
-  out = character()
-  if (inclusive) {
-    indices = 1:(length(raw_values) - 1)
-    for (val_index in indices) {
-      out[x >= raw_values[val_index] & x <= raw_values[val_index + 1]] = ifelse(val_index == length(indices), paste("<=", (raw_values[val_index + 1])), paste("<", (raw_values[val_index + 1])))
-    }
-  }
-  factor(out)
-}
+accuracy_data %>% count(race, pred_acc) %>% na.omit() %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Race" = race) %>% print_kable("Accuracy by Race")
 
-accuracy_data %>% mutate(priors_count = collapse_by(priors_count)) %>%  count(priors_count, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Priors Count" = priors_count) %>% print_kable("COMPAS Accuracy by Priors Count")
-
-accuracy_data %>% filter(!is.na(offense_year)) %>% count(offense_year, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Year" = offense_year) %>% print_kable("COMPAS Accuracy by Year of Offense")
-
-accuracy_data %>% filter(!is.na(offense_month)) %>% count(offense_month, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Month" = offense_month) %>% print_kable("COMPAS Accuracy by Month of Offense")
+# accuracy_data %>% count(c_charge_degree, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Charge Degree" = c_charge_degree) %>% print_kable("COMPAS Accuracy by Charge Degree")
+# 
+# collapse_by = function(x, collapse_func = quantile, inclusive = TRUE) {
+#   raw_values = collapse_func(x)
+#   out = character()
+#   if (inclusive) {
+#     indices = 1:(length(raw_values) - 1)
+#     for (val_index in indices) {
+#       out[x >= raw_values[val_index] & x <= raw_values[val_index + 1]] = ifelse(val_index == length(indices), paste("<=", (raw_values[val_index + 1])), paste("<", (raw_values[val_index + 1])))
+#     }
+#   }
+#   factor(out)
+# }
+# 
+# accuracy_data %>% mutate(priors_count = collapse_by(priors_count)) %>%  count(priors_count, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Priors Count" = priors_count) %>% print_kable("COMPAS Accuracy by Priors Count")
+# 
+# accuracy_data %>% filter(!is.na(offense_year)) %>% count(offense_year, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Year" = offense_year) %>% print_kable("COMPAS Accuracy by Year of Offense")
+# 
+# accuracy_data %>% filter(!is.na(offense_month)) %>% count(offense_month, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Month" = offense_month) %>% print_kable("COMPAS Accuracy by Month of Offense")
 ```
 
 ## Equity Tables
 ```{r}
-equity_table = function(data_set, demo_var, recid_var = "two_year_recid", demo_label = str_to_sentence(demo_var), recid_label = "Recidivism Rate", format_perc = TRUE) {
+equity_table = function(data_set, demo_var, recid_var, demo_label = str_to_sentence(demo_var), recid_label = "Rate", format_perc = TRUE) {
   data_set %>% 
     count(!!sym(demo_var), !!sym(recid_var)) %>% 
+    na.omit() %>% 
     crosstab_percent(vars = demo_var, formatted = format_perc) %>% 
     select(-n) %>% 
     pivot_wider(names_from = recid_var, values_from = "percent") %>% 
     select(-`FALSE`) %>% (function(x) {names(x) = c(demo_label, recid_label); x})
 }
 
-accuracy_data %>% 
-  equity_table("sex") %>% 
-  left_join(accuracy_data %>% 
-              equity_table("sex", recid_var = "pred_recid", recid_label = "COMPAS Predicted Rate")) %>% 
-  print_kable("Recidivism Rate by Gender")
-analysis_data %>% 
-  equity_table("age_cat", demo_label = "Age Group") %>% 
-  left_join(accuracy_data %>% 
-              equity_table("age_cat", demo_label = "Age Group", recid_var = "pred_recid", recid_label = "COMPAS Predicted Rate")) %>% 
-  print_kable("Recidivism Rate by Age Group")
-analysis_data %>% 
-  equity_table("race") %>% 
-  left_join(accuracy_data %>% 
-              equity_table("race", recid_var = "pred_recid", recid_label = "COMPAS Predicted Rate")) %>% print_kable("Recidivism Rate by Race")
+equity_data = analysis_data %>% 
+  mutate(no_bail = (FINREL == "Not made bail"), 
+         fta = FTA1 == "Yes, FTA", 
+         race = ifelse(WHITE == "Yes", "White", ifelse(BLACK == "Yes", "Black", ifelse(HISP == "Yes", "Latinx", "Other"))))
 ```
+
+### Release Rates
+```{r}
+equity_data %>% 
+  mutate(RELDET1 = RELDET1 == "Released") %>% 
+  count(RELDET1) %>% 
+  na.omit() %>% 
+  mutate(Percent = scales::percent(n / sum(n), accuracy = 0.1), RELDET1 = ifelse(RELDET1, "Yes", "No")) %>%
+  rename("Released" = RELDET1) %>% 
+  select(-n) %>% 
+  print_kable("Overall Release Rate")
+
+equity_data %>% 
+  mutate(RELDET1 = RELDET1 == "Released") %>% 
+  equity_table("GENDER", recid_var = "RELDET1") %>% 
+  print_kable("Release Rate by Gender")
+
+equity_data %>% 
+  mutate(RELDET1 = RELDET1 == "Released") %>%  
+  equity_table("AGED", recid_var = "RELDET1", demo_label = "Age Group") %>% 
+  print_kable("Release Rate by Age Group")
+
+equity_data %>% 
+  mutate(RELDET1 = RELDET1 == "Released") %>% 
+  equity_table("race", recid_var = "RELDET1") %>% 
+ print_kable("Release Rate by Race")
+```
+### Bail Rates
+```{r}
+bail_data = equity_data %>% filter(RELDET2 == "Financial release" | RELDET2 == "Held on bail" | RELDET2 == "Denied bail") %>% mutate(offered_bail = RELDET2 != "Denied bail")
+```
+
+On average, `r bail_data$offered_bail %>% mean() %>% scales::percent(accuracy = 0.1)` of people charged with a crime and were not released, were offered to be released on bail.
+
+```{r}
+bail_data %>% filter(!is.na(GENDER)) %>% group_by(GENDER) %>% summarise("Rate" = mean(offered_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Gender" = GENDER) %>% print_kable("Bail Rate by Gender")
+
+bail_data %>% filter(!is.na(AGED)) %>% group_by(AGED) %>% summarise("Rate" = mean(offered_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Age Category" = AGED) %>% print_kable("Bail Rate by Age Category")
+
+bail_data %>% filter(!is.na(race)) %>% group_by(race) %>% summarise("Rate" = mean(offered_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Race" = race) %>% print_kable("Bail Rate by Race")
+```
+
+
+### Bail Amount
+```{r}
+bail_amt_data = equity_data %>% filter(!(is.na(BAILAMT)))
+```
+
+The median bail amount overall is \$`r bail_amt_data$BAILAMT %>% median() %>% format_number()`.
+```{r}
+bail_amt_data %>% select(GENDER, BAILAMT) %>% na.omit() %>% group_by(GENDER) %>% summarise(BAILAMT = median(BAILAMT)) %>% rename("Gender" = GENDER, "Median Bail" = BAILAMT) %>% mutate_if(is.numeric, format_number) %>% print_kable("Median Bail Amount by Gender")
+
+bail_amt_data %>% select(AGED, BAILAMT) %>% na.omit() %>% group_by(AGED) %>% summarise(BAILAMT = median(BAILAMT)) %>% rename("Age Category" = AGED, "Median Bail" = BAILAMT) %>% mutate_if(is.numeric, format_number) %>% print_kable("Median Bail Amount by Age Category")
+
+bail_amt_data %>% select(race, BAILAMT) %>% na.omit() %>% group_by(race) %>% summarise(BAILAMT = median(BAILAMT)) %>% rename("Race" = race, "Median Bail" = BAILAMT) %>% mutate_if(is.numeric, format_number) %>% print_kable("Median Bail Amount by Race")
+```
+
+### Paid Bail Rates
+
+```{r}
+paid_bail_data = bail_amt_data %>% mutate(paid_bail = FINREL == "Made bail") %>% filter(!is.na(paid_bail))
+```
+
+On average, `r paid_bail_data$paid_bail %>% mean() %>% scales::percent(accuracy = 0.1)` of people charged with a crime were able to pay their bail.
+
+```{r}
+paid_bail_data %>% filter(!is.na(GENDER)) %>% group_by(GENDER) %>% summarise("Rate" = mean(paid_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Gender" = GENDER) %>% print_kable("Paid Bail Rate by Gender")
+
+paid_bail_data %>% filter(!is.na(AGED)) %>% group_by(AGED) %>% summarise("Rate" = mean(paid_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Age Category" = AGED) %>% print_kable("Paid Bail Rate by Age Category")
+
+paid_bail_data %>% filter(!is.na(race)) %>% group_by(race) %>% summarise("Rate" = mean(paid_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Race" = race) %>% print_kable("Paid Bail Rate by Race")
+```
+
 
