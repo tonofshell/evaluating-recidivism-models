@@ -25,11 +25,11 @@ inline_if = function(test, yes, no) {
 }
 
 #### Load data ####
-all_data = readRDS(here("cleaned_data.rds"))
+all_data = readRDS(here("cleaned_data.rds")) %>% mutate_all(fix_nas, na_strs = c("Not applicable"))
 discrim_vars = read_csv(here("names_to_keep.csv")) %>% filter(discrim) %>% .$value %>% .[. %in% names(all_data)]
 outcome_vars = read_csv(here("names_to_keep.csv")) %>% filter(outcome) %>% .$value %>% .[. %in% names(all_data)]
 
-fta_all_data = all_data %>% select(-YEARSEQ, -outcome_vars[outcome_vars != "FTA1"]) %>% filter(FTA1 != "Not applicable") %>% mutate(FTA_OUT = FTA1 == "Yes, FTA" ) %>% select(-FTA1)
+fta_all_data = all_data %>% select(-outcome_vars[outcome_vars != "FTA1"]) %>% filter(FTA1 != "Not applicable") %>% mutate(FTA_OUT = FTA1 == "Yes, FTA" ) %>% select(-FTA1)
 fta_fair_data = fta_all_data %>% select(-all_of(discrim_vars))
 
 rm(all_data)
@@ -45,9 +45,9 @@ train_gbm = function(data_set, outcome_name) {
   out$testing_set = data_set[test_indices, ]
   out$training_set = data_set[-test_indices, ]
   options(na.action = 'na.pass')
-  train_mat = model.matrix(~., out$training_set) %>% .[, -1]
+  train_mat = model.matrix(~., select(out$training_set, -YEARSEQ)) %>% .[, -1]
   colnames(train_mat) = make.names(colnames(train_mat))
-  test_mat = model.matrix(~., out$testing_set) %>% .[, -1]
+  test_mat = model.matrix(~., select(out$testing_set, -YEARSEQ)) %>% .[, -1]
   colnames(test_mat) = make.names(colnames(test_mat))
   outcome_index = data_set[[outcome_name]] %>% is.logical() %>% inline_if(colnames(train_mat) == paste0(outcome_name, "TRUE"), colnames(train_mat) == outcome_name) %>% which()
   
