@@ -1,6 +1,8 @@
 # Assessing Equity in Pretrial Flight Risk Models
 An evaluation of equity in models used to predict the risk of a defendant failing to appear for their trial
 
+[Read the Paper](final_paper.pdf)
+
 ## External Resources
 - [Urban Labs R Scripts](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/VWDGHT)
 - [Propublica Data and R Scripts](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/VWDGHT)
