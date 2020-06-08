@@ -1,5 +1,5 @@
-# Evaluating Recidivism Models
-An evaluation of equity in models used to predict recidivism
+# Assessing Equity in Pretrial Flight Risk Models
+An evaluation of equity in models used to predict the risk of a defendant failing to appear for their trial
 
 ## External Resources
 - [Urban Labs R Scripts](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/VWDGHT)
