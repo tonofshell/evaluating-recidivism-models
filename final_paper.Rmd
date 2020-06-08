@@ -1,0 +1,266 @@
+---
+title: "Assessing Equity in Pretrial Flight Risk Models"
+author: "Adam Shelton"
+date: "6/7/2020"
+header-includes:
+   - \usepackage[utf8]{inputenc}
+   - \usepackage{pmboxdraw}
+   - \usepackage{setspace}\doublespacing
+   - \setlength\parindent{24pt}
+   - \usepackage{tabularx, dcolumn}
+output: pdf_document
+bibliography: sources.bib
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(skimr)
+library(kableExtra)
+library(cowpoke)
+library(ggcorrplot)
+library(beachball)
+library(caret)
+library(pROC)
+library(scales)
+library(gbm)
+library(here)
+
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+
+print_kable = function(x, caption = "") {
+  x %>% kable(caption = caption) %>% kable_styling(c("responsive", "condensed", "striped"), latex_options = c("HOLD_position", "striped"), full_width = FALSE)
+}
+
+analysis_data = readRDS(here("cleaned_data.rds"))
+
+fair_model = readRDS(here("full_fair_model.rds"))
+full_model = readRDS(here("full_all_model.rds"))
+
+var_cats = read_csv(here("names_to_keep.csv")) %>% select(-name) %>% rename(name = value) %>% filter(keep) %>% select(-keep) %>% mutate(is_outcome = name == "FTA1", used_in = ifelse(discrim, "Full Model", ifelse(!(discrim | outcome) | (outcome & is_outcome), "Both Models", "Neither Model"))) %>% select(-discrim, -outcome, -is_outcome)
+
+var_descrs = analysis_data %>% lapply((function(x) attributes(x)$label %>% str_to_title())) %>% {tibble(name = names(.), descr = unlist(.))} %>% left_join(var_cats) %>% arrange(name) %>% mutate(descr = str_replace(descr, "Cj ", "Criminal Justice ")) %>% rename("Variable Name" = name, "Description" = descr, "Used In" = used_in)
+```
+
+## Introduction
+
+In the United States, people who are arrested are typically held until a judge can determine whether the defendant can be released or must remain detained until their court date. What judges consider when making this decision varies by region, but the greatest concern is typically the risk of the defendant failing to appear for their court date [@Kleinberg2018]. While traditionally, judges estimated these risks on their own, weighing the defendant's criminal history and situation, more districts are turning to the aid of predictive modeling to assign defendants a risk score for them failing to appear [@Richardson2019]. While a statistical model can account for more factors in a much more consistent manner than a judge could, alleviating costs to taxpayers and defendants [@UrbanLabs2019], the best models are only as good as the data used to train them. With the advent of predictive modeling for such a use case, there are concerns that these models, when trained on data gathered from areas with inequitable policing practices, could develop an algorithmic prejudice, actually exacerbating disparities in the population [@UrbanLabs2019; @Richardson2019]. 
+
+A team at Urban Labs working along with the New York City Mayor's Office of Criminal Justice, developed models using machine learning that it claimed better predicted whether a defendant would return to court while also reducing disparities in detention [@UrbanLabs2019]. Some of the members of this team [@Kleinberg2018] have published their work about creating equitable machine learning models. This project aims to replicate these results using data from another source [@Levin2009], assessing the predictive performance and equity of the models used in @Kleinberg2018, in comparison to human judges and a model purely focused on predictive performance. 
+
+## Data Overview
+
+The data used for this project comes from @Levin2009, which aimed to "assess the impact of Latino ethnicity on pretrial release decisions in large urban counties". While the focus of @Levin2009 was on the disparities between Hispanic and non-Hispanic defendants, the data encompasses defendants of all races over the course of several years and large urban counties. The full dataset encompasses 115,000+ observations of over 350 variables, but for this project we will just focus on a selection of this data about individual defendants and their judicial outcomes. Comprehensive information about the data used is included in the [Appendices].
+
+### Equity of Judicial Outcomes
+
+To understand how much better or worse the equity of our models is, we must first explore the equity in the data and human decisions made by judges. It is clear from this data that judges and the judicial system as a whole exhibit biases in the decisions that are made. For this project, we will explore three possible dimensions of inequity, gender, age, and race for the outcomes of release rate, bail rate, and bail amount.  
+
+```{r}
+equity_table = function(data_set, demo_var, recid_var, demo_label = str_to_sentence(demo_var), recid_label = "Rate", format_perc = TRUE) {
+  data_set %>% 
+    count(!!sym(demo_var), !!sym(recid_var)) %>% 
+    na.omit() %>% 
+    crosstab_percent(vars = demo_var, formatted = format_perc) %>% 
+    select(-n) %>% 
+    pivot_wider(names_from = recid_var, values_from = "percent") %>% 
+    select(-`FALSE`) %>% (function(x) {names(x) = c(demo_label, recid_label); x})
+}
+
+equity_data = analysis_data %>% 
+  mutate(no_bail = (FINREL == "Not made bail"), 
+         fta = FTA1 == "Yes, FTA", 
+         race = ifelse(WHITE == "Yes", "White", ifelse(BLACK == "Yes", "Black", ifelse(HISP == "Yes", "Latinx", "Other"))))
+```
+
+#### Release Rates
+```{r}
+release_data = equity_data %>% 
+  mutate(RELDET1 = RELDET1 == "Released") %>%
+  filter(!is.na(RELDET1))
+```
+
+Of all the defendants in this dataset, `r release_data$RELDET1 %>% mean() %>% scales::percent(accuracy = 0.1)` of them were released without bail. Women were much more likely to be released than men, with judges choosing to let almost three quarters of women go versus just three fifths of men. The disparity in release rates is smaller by age, but still exists, with younger and older defendants being more likely to be released. White defendants are the most likely to be released, considerably more so than the least likely, Hispanic/Latinx defendants.
+
+
+```{r}
+release_data %>%
+  equity_table("GENDER", recid_var = "RELDET1") %>% 
+  print_kable("Release Rate by Gender")
+
+release_data %>%
+  equity_table("AGED", recid_var = "RELDET1", demo_label = "Age Group") %>% 
+  print_kable("Release Rate by Age Group")
+
+release_data %>%
+  equity_table("race", recid_var = "RELDET1") %>% 
+ print_kable("Release Rate by Race")
+```
+
+#### Bail Rates
+```{r}
+bail_data = equity_data %>% filter(RELDET2 == "Financial release" | RELDET2 == "Held on bail" | RELDET2 == "Denied bail") %>% mutate(offered_bail = RELDET2 != "Denied bail")
+```
+
+On average, `r bail_data$offered_bail %>% mean() %>% scales::percent(accuracy = 0.1)` of people who charged with a crime but not released, were offered to be released on bail. Women and younger or very old defendants were more likely to receive the opportunity to be released on bail. However, minors were the age group *least* likely to receive bail. This might be a result of judges being much more likely to release minors into the custody of their parents than adult defendants. Therefore, only the most extreme cases with minor defendants are detained, leading to a lower likelihood of bail. Bail rates appear to follow a traditional racial hierarchy, with black defendants and Hispanic/Latinx defendants having the lowest and second lowest bail rates, respectively. However, interestingly white defendants *do not* have the highest probability of receiving bond, but rather defendants who identified as an other race. 
+
+```{r}
+bail_data %>% filter(!is.na(GENDER)) %>% group_by(GENDER) %>% summarise("Rate" = mean(offered_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Gender" = GENDER) %>% print_kable("Bail Rate by Gender")
+
+bail_data %>% filter(!is.na(AGED)) %>% group_by(AGED) %>% summarise("Rate" = mean(offered_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Age Category" = AGED) %>% print_kable("Bail Rate by Age Category")
+
+bail_data %>% filter(!is.na(race)) %>% group_by(race) %>% summarise("Rate" = mean(offered_bail) %>% scales::percent(accuracy = 0.1)) %>% rename("Race" = race) %>% print_kable("Bail Rate by Race")
+```
+
+#### Bail Amount
+```{r}
+bail_amt_data = equity_data %>% filter(!(is.na(BAILAMT)))
+```
+
+While the median bail amount overall is \$`r bail_amt_data$BAILAMT %>% median() %>% format_number()`, bail bonds vary greatly by demographics. On average men are required to put up twice the median bail amount compared to women. It is unclear why this disparity exists, but perhaps women are perceived to be less of a flight risk, or  typically commit less serious crimes than men. While judges choose to give most age groups the same median amount of bail, young people are given less, perhaps because they earn less on average. Defendants identifying as black or white incur the lowest bail amounts, while Hispanic/Latinx defendants are subject to the highest median bails. This indicates that while a racial disparity in bail amounts does exist, it does not follow traditional racial hierarchies in the way we might expect.
+
+```{r}
+bail_amt_data %>% select(GENDER, BAILAMT) %>% na.omit() %>% group_by(GENDER) %>% summarise(BAILAMT = median(BAILAMT)) %>% rename("Gender" = GENDER, "Median Bail" = BAILAMT) %>% mutate_if(is.numeric, format_number) %>% print_kable("Median Bail Amount by Gender")
+
+bail_amt_data %>% select(AGED, BAILAMT) %>% na.omit() %>% group_by(AGED) %>% summarise(BAILAMT = median(BAILAMT)) %>% rename("Age Category" = AGED, "Median Bail" = BAILAMT) %>% mutate_if(is.numeric, format_number) %>% print_kable("Median Bail Amount by Age Category")
+
+bail_amt_data %>% select(race, BAILAMT) %>% na.omit() %>% group_by(race) %>% summarise(BAILAMT = median(BAILAMT)) %>% rename("Race" = race, "Median Bail" = BAILAMT) %>% mutate_if(is.numeric, format_number) %>% print_kable("Median Bail Amount by Race")
+```
+
+### Flight Risk Accuracy 
+
+One way we might want to measure the performance and equity of our model is by comparing it to the existing system of a human judge making a decision. Here we are trying to estimate the "accuracy" of those determining whether a person charged with a crime is a flight risk, and therefore should be detained until their trial. While we obviously cannot know whether someone who was detained until trial would have returned for their trial or not from this data, we can attempt to measure this from those who were released after paying their bail. Someone who was released on bail would likely have been considered a significantly greater flight risk than a person released with no bail. 
+
+We can attempt to measure the number of false positives by looking at people who were deemed a high enough flight risk for bail, but still returned. Those who were released on bail and did not return are considered to be "correctly" classified here. If someone were released and returned then they were correctly classified, while those who were released without bail and did not return would be considered a false negative. This is not a perfect measurement of classification accuracy, since bail is a variable amount, and is different than being released even if a high flight risk with no collateral, but should be close enough to determine how accurate and equitable humans are in this process.
+
+```{r}
+tibble(" " = c("Paid Bail", "No Bail"), "Appeared at Court" = c("False Positive", "Correct"), "Did Not Appear" = c("Correct", "False Negative")) %>% print_kable("Pseudo-Accuracy Coding")
+
+accuracy_data = analysis_data %>% 
+  filter(RELDET1 == "Released") %>% 
+  filter(!is.na(FTA1)) %>%
+  mutate(no_bail = (FINREL == "Not made bail"), 
+         fta = FTA1 == "Yes, FTA", 
+         pred_acc = ifelse(fta, 
+                           ifelse(no_bail, "False Negative", "Correct"), 
+                           ifelse(no_bail, "Correct", "False Positive")),
+         race = ifelse(WHITE == "Yes", "White", ifelse(BLACK == "Yes", "Black", ifelse(HISP == "Yes", "Latinx", "Other"))))
+
+# accuracy_data %>% select(FINREL, no_bail, fta, FTA1, pred_acc) %>% distinct() %>% View()
+
+accuracy_data %>% count(pred_acc) %>% na.omit() %>% mutate(percent = scales::percent(n / sum(n), accuracy = 0.1)) %>% select(-n) %>% rename("Prediction Accuracy" = pred_acc) %>% print_kable("Overall Accuracy")
+
+accuracy_data %>% count(GENDER, pred_acc) %>% na.omit() %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Gender" = GENDER) %>% print_kable("Accuracy by Gender")
+
+accuracy_data %>% count(AGED, pred_acc) %>% na.omit() %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Age Category" = AGED) %>% print_kable("Accuracy by Age Category")
+
+accuracy_data %>% count(race, pred_acc) %>% na.omit() %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Race" = race) %>% print_kable("Accuracy by Race")
+```
+
+In aggregate, it appears that, like @Kleinberg2018 suggests, humans are poor at predicting whether a defendant will not appear for their trial. Furthermore, there is clear bias towards certain demographics in the results of these decisions. Although the evidence of these biases is apparent, it is not evident from this data whether this is due to the prejudices of judges or systematic biases.
+
+## Methodology
+
+This project adapts the methodology in @Kleinberg2018, which predicts whether a defendant fails to appear for their scheduled court date using a Gradient Boosting Model (GBM). GBMs are known for their high predictive accuracy and abilities to account for a variety of data types and missing data. @Kleinberg2018, omits all demographic variables except for age in an attempt to make their model more equitable, although they acknowledge that some of these demographic characteristics could be reflected through the interactions of other variables which were included. The GBM generated by @Kleinberg2018 uses the `caret` package to conduct 5-fold cross validation to find the optimal values for the hyper-parameters of number of trees, interaction depth, shrinkage, while keeping twenty minimum observations in each node.
+
+This methodology by @Kleinberg2018 is built upon by using their modeling process to generate two GBMs using a similar but larger dataset from @Levin2009. The first GBM follows the process outlined in @Kleinberg2018 by excluding demographic variables that could directly introduce inequity in the model. However, while @Kleinberg2018 include age, it is omitted here. For the second model, all the variables, including those measuring demographic characteristics are included. This is to provide a comparison between a model that is intended to be equitable with a model that is simply attempting to provide the best predictive accuracy. Both models are predicting whether each defendant failed to appear (FTA) on their originally scheduled court date. Some defendants miss their first court appearance, but later appear to a subsequent scheduled court date, while others never make any court appearances. As @Kleinberg2018 does not appear to specify which measure of FTA they used, and it is unclear from the data whether a defendant was later arrested and forced to held until their new court date or returned of their own volition, it seems most sensible to use any FTA as the predictor variable.
+
+Each model will be assessed using raw prediction accuracy and the area under the curve (AUC) of the receiver operating characteristic (ROC) curve calculated on the testing set, which is one-quarter of the full dataset. Each of these measures of model performance will also be measured for each category in three demographic measures, gender, age, and race/ethnicity. This will show whether each model can predict some demographics better than others. Variable importance tables will also be generated for each model to provide more insight on which variables are driving predictive performance, and, in the case of the model with every variable, whether demographic variables are more important than other variables. As GBMs predict a probability of each observation belonging to each outcome class, the mean probability for each demographic category will also be assessed. A truly equitable model would be able to predict the outcome of people with identical accuracy and mean class probabilities regardless of their demographic characteristics. 
+
+
+## Results
+
+### Full Model
+```{r}
+full_mod_data = full_model$testing_set %>% bind_cols(full_model$test_preds) %>% mutate(pred_class = test_prob > 0.5, race = ifelse(WHITE == "Yes", "White", ifelse(BLACK == "Yes", "Black", ifelse(HISP == "Yes", "Latinx", "Other"))))
+
+roc_full = full_mod_data %>% {roc(as.numeric(.$FTA_OUT), as.numeric(.$pred_class))}
+acc_full = full_mod_data %>% {.$FTA_OUT == .$pred_class} %>% mean()
+
+varImp(full_model$train_fit)$importance %>% as_tibble(rownames = "Name") %>% rename("Importance" = Overall) %>% arrange(-Importance) %>% mutate(Importance = format_number(Importance)) %>% top_n(20, Importance) %>% print_kable("Variable Importance - Full Model")
+```
+
+This model was trained on `r full_model$training_set %>% nrow() %>% format_number()` observations of `r full_model$training_set %>% ncol() %>% format_number()` variables. Accuracy and ROC AUC were calculated from a testing set of `r full_model$testing_set %>% nrow() %>% format_number()` observations. Overall, the full model with all the variables has an accuracy of `r acc_full %>% format_number()` and a ROC AUC of `r roc_full %>% auc() %>% format_number()`, indicating this is a moderately predictive model. The mean predicted probability of a defendant failing to appear is `r full_mod_data$test_prob %>% mean() %>% format_number()`. This is a significant improvement over the estimated human accuracy rates we computed previously.
+
+As we might anticipate, some of the most important variables contributing to the model are characteristics of defendant's criminal history, like if they have been arrested many times before, had a drug offense, or their most serious previous conviction was a felony. Race and gender are also important factors in the model. Surprisingly, the high importance of the type of attorney a defendant has and the region in which they are in, suggests systemic forces are important to predicting whether a defendant will return for their trial.
+
+The equity of the model is not as bad as one might anticipate, but the model still exhibits some moderate disparities. While the AUC is about equal for either gender, the model can predict a woman's flight risk with slightly more accuracy. However, both men and women are predicted to have a very similar probability of flight risk. For age, predictive performance varies much more wildly, with the model struggling more to accurately predict the flight risk of the youngest and oldest defendants. Yet, only the oldest defendants are predicted to have a much lower probability of failing to appear for their trial. Black defendants have a low raw accuracy but the highest AUC, while white defendants were the reverse, making it unclear whether prediction accuracy is racially biased in this model. Still, white defendants have the lowest predicted probability of failing to appear. 
+
+```{r}
+acc_table = function(data_set, demo_var, actual_var = "FTA_OUT", pred_var = "pred_class", prob_var = "test_prob") {
+  data_set %>% filter(!is.na(get(demo_var))) %>% group_by(get(demo_var)) %>% summarise(Accuracy = mean(get(pred_var) == get(actual_var)), AUC = roc(as.numeric(get(actual_var)), as.numeric(get(pred_var))) %>% auc() %>% as.numeric(), Probability = mean(get(prob_var))) %>% set_names(c(str_to_title(demo_var), names(.)[-1])) %>% mutate_if(is.numeric, format_number)
+}
+```
+
+```{r}
+acc_table(full_mod_data, "GENDER")  %>% print_kable("Predictions by Gender - Full Model")
+```
+
+```{r}
+acc_table(full_mod_data, "AGED")  %>% print_kable("Predictions by Age - Full Model")
+```
+
+```{r}
+acc_table(full_mod_data, "race")  %>% print_kable("Predictions by Race - Full Model")
+```
+
+### More Equitable Model
+
+```{r}
+demo_data = analysis_data %>% mutate(race = ifelse(WHITE == "Yes", "White", ifelse(BLACK == "Yes", "Black", ifelse(HISP == "Yes", "Latinx", "Other")))) %>% select(YEARSEQ, GENDER, AGED, race)
+
+fair_mod_data = fair_model$testing_set %>% bind_cols(full_model$test_preds) %>% mutate(pred_class = test_prob > 0.5) %>% left_join(demo_data)
+
+roc_fair = fair_mod_data %>% {roc(as.numeric(.$FTA_OUT), as.numeric(.$pred_class))}
+acc_fair = fair_mod_data %>% {.$FTA_OUT == .$pred_class} %>% mean()
+
+varImp(fair_model$train_fit)$importance %>% as_tibble(rownames = "Name") %>% rename("Importance" = Overall) %>% arrange(-Importance) %>% mutate(Importance = format_number(Importance)) %>% top_n(20, Importance) %>% print_kable("Variable Importance - Equitable Model")
+```
+
+This model was trained on `r fair_model$training_set %>% nrow() %>% format_number()` observations of `r fair_model$training_set %>% ncol() %>% format_number()` variables. Accuracy and ROC AUC were calculated from a testing set of `r fair_model$testing_set %>% nrow() %>% format_number()` observations. Overall the full model with all the variables has an accuracy of `r acc_fair %>% format_number()` and a ROC AUC of `r roc_fair %>% auc() %>% format_number()`, indicating this is a moderately predictive model. The mean predicted probability of a defendant failing to appear is `r fair_mod_data$test_prob %>% mean() %>% format_number()`. While this model loses some predictive performance over the previous model, it is a significant improvement over the estimated human accuracy rates we computed previously.
+
+By excluding variables measuring gender, age, and race, the equity of the model appears to have improved. Gender disparities decreased the most, now with only about one point of difference between men and women across all measures. Age and race disparities also decreased, especially among AUC's and probabilities. However, some small differences still exist among different age and racial categories for raw accuracy.
+
+```{r}
+acc_table(fair_mod_data, "GENDER")  %>% print_kable("Predictions by Gender - Equitable Model")
+```
+
+```{r}
+acc_table(fair_mod_data, "AGED")  %>% print_kable("Predictions by Age - Equitable Model")
+```
+
+```{r}
+acc_table(fair_mod_data, "race")  %>% print_kable("Predictions by Race - Equitable Model")
+```
+
+## Discussion
+
+It appears that the methodology put forth by @Kleinberg2018 for Urban Labs and the City of New York is sound. Gradient Boosting Models provide greater accuracy and equity for predicting a defendant's risk of failing to appear for trial than humans. Furthermore, omitting demographic variables as @Kleinberg2018 did, does reduce disparities in the model, at the expense of slightly less predictive performance overall. However, even our "bad" model with these demographic variables included seemed to be more accurate and equitable than human judges are on their own.
+
+Yet despite these resounding successes, there remains a few hurdles for predictive judging. The most notable is the predictive performance of these models. While an improvement over humans, the full model had an overall predictive performance around 0.8 and the equitable model at about 0.75. The ROC AUC was much lower, around 0.55 and 0.5, respectively. This is decent but not great either, especially for a use case which can so deeply affect a person's life. Are judges and citizens willing to swallow the prediction being wrong about one quarter of the time, even if that is better than a human judge? Even if the models are a substantial increase in accuracy over human judges, it is not clear how well judges will be able to interpret and use this information from the models.
+
+Furthermore, when analyzing the variable importance of the models, it appears a large portion of predictive performance comes from measures of systemic forces. Including more variables about police districts, judges and what resources they are provided would likely increase predictive performance even more. However, including a large number of variables describing these systems raises greater questions, notably whether it is just to base a decision that is so important on many factors outside of a person's control. Is it more equitable to include measurements about these systems to perhaps better control for problems like over-policing, or less equitable to predict a person's outcome more from where they were arrested than how they have acted in the past? These are important questions to answer as these models become more widely used. 
+
+Regardless of how these problems are confronted, they should be done publicly with the most possible transparency. Citizens have a right to know how their futures may be determined, and if those processes for doing so are up to their standards. As this project has demonstrated, predictive modeling can be effective if done carefully and thoughtfully, considering all the possible effects of such a model. However, just as easily a poorly executed model can exacerbate problems with inequality. Therefore, it is imperative that researchers continue to investigate predictive models being used in all aspects of our lives, to assure others that they *are* an improvement over human decision-making.
+
+
+## Appendices
+
+### Variable Descriptions
+```{r}
+var_descrs %>% .[1:round(nrow(.)/2),] %>% print_kable("Variable Descriptions")
+var_descrs %>% .[(round(nrow(.)/2) + 1):nrow(.),] %>% print_kable("Variable Descriptions Cont.")
+```
+
+### Descriptive Statistics
+
+```{r}
+descr_stats = analysis_data %>% mutate_all(fix_nas, na_strs = "Not applicable") %>% skim() %>% partition()
+
+descr_stats$factor %>% rename("Variable" = skim_variable, "Num. Miss." = n_missing, "Complete Rate" = complete_rate, "Num. Unique" = n_unique, "Top Counts" = top_counts) %>% select(-ordered) %>% mutate_if(is.numeric, format_number) %>% .[1:round(nrow(.)/2),] %>% print_kable("Factor Variables") %>% kable_styling(latex_options = "scale_down")
+
+descr_stats$factor %>% rename("Variable" = skim_variable, "Num. Miss." = n_missing, "Complete Rate" = complete_rate, "Num. Unique" = n_unique, "Top Counts" = top_counts) %>% select(-ordered) %>% mutate_if(is.numeric, format_number) %>% .[(round(nrow(.)/2) + 1):nrow(.),] %>% print_kable("Factor Variables Cont.") %>% kable_styling(latex_options = "scale_down")
+
+descr_stats$numeric %>% rename("Variable" = skim_variable, "Num. Miss." = n_missing, "Complete Rate" = complete_rate, "Mean" = mean, "Std. Dev." = sd, "0 Pctl." = p0, "25 Pctl." = p25, "50 Pctl." = p50, "75 Pctl." = p75, "100 Pctl." = p100) %>% select(-hist) %>% mutate_if(is.numeric, format_number) %>% print_kable("Continuous Variables") %>% kable_styling(latex_options = "scale_down")
+```
+
+## References
