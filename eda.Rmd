@@ -81,26 +81,6 @@ accuracy_data %>% count(GENDER, pred_acc) %>% na.omit() %>% crosstab_percent(for
 accuracy_data %>% count(AGED, pred_acc) %>% na.omit() %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Age Category" = AGED) %>% print_kable("Accuracy by Age Category")
 
 accuracy_data %>% count(race, pred_acc) %>% na.omit() %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Race" = race) %>% print_kable("Accuracy by Race")
-
-# accuracy_data %>% count(c_charge_degree, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Charge Degree" = c_charge_degree) %>% print_kable("COMPAS Accuracy by Charge Degree")
-# 
-# collapse_by = function(x, collapse_func = quantile, inclusive = TRUE) {
-#   raw_values = collapse_func(x)
-#   out = character()
-#   if (inclusive) {
-#     indices = 1:(length(raw_values) - 1)
-#     for (val_index in indices) {
-#       out[x >= raw_values[val_index] & x <= raw_values[val_index + 1]] = ifelse(val_index == length(indices), paste("<=", (raw_values[val_index + 1])), paste("<", (raw_values[val_index + 1])))
-#     }
-#   }
-#   factor(out)
-# }
-# 
-# accuracy_data %>% mutate(priors_count = collapse_by(priors_count)) %>%  count(priors_count, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Priors Count" = priors_count) %>% print_kable("COMPAS Accuracy by Priors Count")
-# 
-# accuracy_data %>% filter(!is.na(offense_year)) %>% count(offense_year, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Year" = offense_year) %>% print_kable("COMPAS Accuracy by Year of Offense")
-# 
-# accuracy_data %>% filter(!is.na(offense_month)) %>% count(offense_month, pred_acc) %>% crosstab_percent(formatted = TRUE) %>% select(-n) %>% pivot_wider(names_from = pred_acc, values_from = percent) %>% rename("Month" = offense_month) %>% print_kable("COMPAS Accuracy by Month of Offense")
 ```
 
 ## Equity Tables
